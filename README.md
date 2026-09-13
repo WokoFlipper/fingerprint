@@ -50,6 +50,20 @@ reboot
 
 After reboot `fprintd-list "$USER"` should show the device.
 
+## Install
+
+From git (works right now, on any distro):
+
+```bash
+git clone https://github.com/WokoFlipper/fingerprint.git
+cd fingerprint && ./install.sh
+```
+
+AUR (`yay -S fingerprint-manager-git`): package is ready in `aur/`
+(PKGBUILD + .SRCINFO, test-built), but AUR new-account registration is
+temporarily frozen (June 2026 malicious-packages incident), so submission
+waits for reopening. Watch Arch news / aur-general.
+
 ## Quick start (one-shot per distro)
 
 ```bash
