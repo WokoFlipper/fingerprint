@@ -1,0 +1,39 @@
+# Maintainer: Resty <resty@localhost>
+pkgname=fingerprint-manager-git
+pkgver=r9.29e315e
+pkgrel=1
+pkgdesc="Fingerprint manager for Huawei/Honor laptops: fprintd TUI + GTK GUI, sensor check, per-distro enroll"
+arch=('any')
+url="https://github.com/WokoFlipper/fingerprint"
+license=('MIT')
+depends=('fprintd' 'libfprint' 'python-gobject' 'gtk3')
+makedepends=('git')
+optdepends=('fwupd: fingerprint sensor firmware updates')
+provides=('fingerprint-manager')
+conflicts=('fingerprint-manager')
+source=("git+https://github.com/WokoFlipper/fingerprint.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd fingerprint
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd fingerprint
+  install -Dm755 fngrmngr "$pkgdir/usr/bin/fngrmngr"
+  install -Dm755 fngrmngr-gui "$pkgdir/usr/bin/fngrmngr-gui"
+  install -Dm644 fingerprint.desktop "$pkgdir/usr/share/applications/fingerprint.desktop"
+  install -Dm644 icons/fingerprint.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/fingerprint.svg"
+  install -Dm644 icons/fingerprint.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/fingerprint.png"
+  install -Dm755 check-sensor.sh "$pkgdir/usr/share/fingerprint/check-sensor.sh"
+  install -Dm755 setup-pam.sh "$pkgdir/usr/share/fingerprint/setup-pam.sh"
+  install -Dm755 enroll/enroll.sh "$pkgdir/usr/share/fingerprint/enroll/enroll.sh"
+  install -Dm755 enroll/arch.sh "$pkgdir/usr/share/fingerprint/enroll/arch.sh"
+  install -Dm755 enroll/debian.sh "$pkgdir/usr/share/fingerprint/enroll/debian.sh"
+  install -Dm755 enroll/fedora.sh "$pkgdir/usr/share/fingerprint/enroll/fedora.sh"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/${pkgname%-git}/README.md"
+  install -Dm644 SECURITY.md "$pkgdir/usr/share/doc/${pkgname%-git}/SECURITY.md"
+  install -Dm644 screenshot.png "$pkgdir/usr/share/doc/${pkgname%-git}/screenshot.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

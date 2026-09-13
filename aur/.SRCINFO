@@ -1,0 +1,19 @@
+pkgbase = fingerprint-manager-git
+	pkgdesc = Fingerprint manager for Huawei/Honor laptops: fprintd TUI + GTK GUI, sensor check, per-distro enroll
+	pkgver = r11.9d9fad7
+	pkgrel = 1
+	url = https://github.com/WokoFlipper/fingerprint
+	arch = any
+	license = MIT
+	makedepends = git
+	depends = fprintd
+	depends = libfprint
+	depends = python-gobject
+	depends = gtk3
+	optdepends = fwupd: fingerprint sensor firmware updates
+	provides = fingerprint-manager
+	conflicts = fingerprint-manager
+	source = git+https://github.com/WokoFlipper/fingerprint.git
+	sha256sums = SKIP
+
+pkgname = fingerprint-manager-git
