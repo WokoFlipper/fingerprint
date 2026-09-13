@@ -5,6 +5,12 @@ deleting fingerprints via `fprintd`, with per-service PAM toggles
 (sudo, login, lock screen…). Written for Huawei/Honor laptops, whose
 fingerprint sensor is the same across models (see Step 0).
 
+> **Works on any Linux.** The tools are plain bash + Python/GTK and only
+> need `fprintd`, `libfprint` and `python-gobject` from your distro's
+> repositories — Arch, Debian/Ubuntu, Fedora
+> (`sudo dnf install fprintd fprintd-pam python3-gobject gtk3`), openSUSE,
+> anything. No Omarchy, no desktop-specific daemons required.
+
 ## Step 0. Sensor: identify it, flash firmware if needed
 
 Huawei/Honor AMD laptops (MateBook D14/D15, Honor MagicBook 14/15/Pro and
