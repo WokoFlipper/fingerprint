@@ -16,19 +16,29 @@ Bus 001 Device 005: ID 27c6:5110 Shenzhen Goodix Technology Co.,Ltd. ...
 ```
 
 `27c6:5110` = Goodix TLS sensor, handled by libfprint's `goodixmoc` driver
-(libfprint ≥ 1.94). If `fprintd-list` reports *no devices found*, the sensor
-usually needs its firmware from LVFS first:
+(libfprint ≥ 1.94). Run `./check-sensor.sh` first — it identifies the reader
+and tells you the firmware path. Quick reference:
+
+| Sensor (USB VID) | Examples | Firmware flashable? |
+|---|---|---|
+| Goodix `27c6` | 5110 (Huawei/Honor), 6001, 6496 | **Yes**, via fwupd `goodix-moc` plugin **if** the vendor published firmware on LVFS. `27c6:5110` TLS normally works with stock libfprint, no flash needed; early community TLS forks required a one-time flash with the `goodix-fp-dump` tool |
+| Synaptics Prometheus `06cb` | 00a9, 00a2 (ThinkPads…) | **Yes**, via fwupd `synaptics-prometheus` plugin if LVFS carries it |
+| ELAN `04f3` | elan / elanmoc devices | **No** fwupd path — works out of the box or not at all; keep libfprint fresh |
+| Validity `138a` | legacy 00xx | **No** — mostly unsupported by libfprint, no flash path |
+| FPC `10c4` / EgisTec `1c7a` | fpcmoc / egismoc devices | **No** fwupd path (drivers exist in libfprint) |
+
+If `fprintd-list` reports *no devices found* on a flashable sensor, pull
+firmware from LVFS first:
 
 ```bash
 sudo pacman -S fwupd            # or: sudo apt install fwupd
 fwupdmgr refresh --force
-fwupdmgr get-devices | grep -iA5 -i goodix
-fwupdmgr update                 # applies Goodix firmware if offered
+fwupdmgr get-devices            # look for your fingerprint reader
+fwupdmgr update                 # applies vendor firmware if offered
 reboot
 ```
 
-After reboot `fprintd-list "$USER"` should show the device
-(`Goodix TLS Fingerprint Sensor`).
+After reboot `fprintd-list "$USER"` should show the device.
 
 ## Step 1. Stack
 
