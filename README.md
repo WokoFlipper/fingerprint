@@ -113,6 +113,15 @@ fprintd-delete -u "$USER" -f right-index-finger   # per finger, or delete all in
 - Sensor missing after kernel update → re-run `fwupdmgr get-devices`; if gone,
   reinstall `libfprint`/`fprintd` and reboot.
 
+## Uninstall
+
+```bash
+./uninstall.sh
+```
+
+Removes the tools, menu entry and icons. Enrolled prints and PAM lines stay
+— remove them explicitly (see Rollback above).
+
 ## Files
 
 | File | Purpose |
@@ -122,6 +131,7 @@ fprintd-delete -u "$USER" -f right-index-finger   # per finger, or delete all in
 | `fingerprint.desktop` | Menu entry |
 | `icons/` | App icons (SVG + 256px PNG) |
 | `install.sh` | User install (deps check + files) |
+| `uninstall.sh` | User uninstall (tools + menu entry + icons) |
 | `setup-pam.sh` | PAM enable with backups (root) |
 
 ## License
