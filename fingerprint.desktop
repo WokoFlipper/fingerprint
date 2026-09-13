@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Fingerprint
+GenericName=Fingerprint manager
+Comment=Manage fingerprints (fprintd) on Huawei/Honor laptops
+Exec=fngrmngr-gui
+Icon=fingerprint
+Terminal=false
+Categories=Utility;
+Keywords=fingerprint;fprintd;biometric;goodix;
+StartupNotify=true

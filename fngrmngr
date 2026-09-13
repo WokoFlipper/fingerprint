@@ -1,0 +1,353 @@
+#!/bin/bash
+# fingersetup - terminal fingerprint manager with pseudo-graphics TUI
+# Requires: fprintd-clients (fprintd-enroll, fprintd-list, fprintd-delete, fprintd-verify)
+
+set -uo pipefail
+
+# ---------- color / style ----------
+RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'
+CYAN='\033[1;36m'; MAG='\033[1;35m'; DIM='\033[2m'; BOLD='\033[1m'
+RESET='\033[0m'
+
+# box drawing
+TL='┌'; TR='┐'; BL='└'; BR='┘'; H='─'; V='│'; LT='├'; RT='┤'
+CHECK='✓'; CROSS='✗'; POINT='›'; DOT='•'; ARRC='➜'
+
+W=60
+
+# ---------- helpers ----------
+line()  { printf "${DIM}${H}%.0s${RESET}" $(seq 1 "$W"); }
+hr()    { printf "${DIM}${H}%.0s${RESET}" $(seq 1 "$1"); }
+title_box() {
+  local t="$1" sub="$2"
+  printf "${BLUE}${TL}${H}%.0s${RESET}" $(seq 1 $((W-2)))
+  printf "${BLUE}${H} ${BOLD}${t}${RESET} "
+  printf "${BLUE}${H}%.0s${RESET}" $(seq 1 $((W-3-${#t})))
+  printf "${BLUE}${TR}${RESET}\n"
+  [[ -n "$sub" ]] && { printf "${DIM}  ${sub}${RESET}\n"; }
+  printf "${BLUE}${LT}${H}%.0s${RESET}" $(seq 1 $((W-2)))
+  printf "${BLUE}${RT}${RESET}\n"
+}
+foot_box() {
+  printf "${BLUE}${BL}${H}%.0s${RESET}" $(seq 1 $((W-2)))
+  printf "${BLUE}${BR}${RESET}\n"
+}
+msg()   { printf "${GREEN}${CHECK}${RESET} %s\n" "$1"; }
+warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
+err()   { printf "${RED}${CROSS}${RESET} %s\n" "$1"; }
+info()  { printf "${CYAN}${POINT}${RESET} %s\n" "$1"; }
+menu_line() { printf "  ${BOLD}%s${RESET}. ${POINT} %s\n" "$1" "$2"; }
+pause() { printf "\n${DIM}Нажми Enter...${RESET}"; read -r; }
+
+# ---------- data ----------
+FINGER_NAMES=(left-thumb left-index-finger left-middle-finger left-ring-finger left-little-finger right-thumb right-index-finger right-middle-finger right-ring-finger right-little-finger)
+FINGER_RU=( "Большой (левый)" "Указательный (левый)" "Средний (левый)" "Безымянный (левый)" "Мизинец (левый)" "Большой (правый)" "Указательный (правый)" "Средний (правый)" "Безымянный (правый)" "Мизинец (правый)" )
+
+REQUIRED_CMDS=(fprintd-list fprintd-enroll fprintd-delete fprintd-verify)
+
+# ---------- device detection ----------
+detect_device() {
+  if ! command -v fprintd-list >/dev/null 2>&1; then
+    return 2
+  fi
+  if fprintd-list "$USER" &>/dev/null; then
+    return 0
+  fi
+  # device absent
+  if ! fprintd-list 2>&1 | grep -qi "device"; then
+    return 1
+  fi
+  return 0
+}
+
+list_print_count() {
+  fprintd-list "$USER" 2>/dev/null | grep -c '^ - '
+}
+
+banner_status() {
+  local n
+  n=$(list_print_count)
+  if detect_device; then
+    printf "  ${GREEN}${DOT}${RESET} Устройство: ${BOLD}%s${RESET}\n" "$(fprintd-list "$USER" 2>/dev/null | grep -i "Device:" | head -1 | sed 's/.*Device: //')"
+    printf "  ${GREEN}${DOT}${RESET} Отпечатков на складе: ${BOLD}%s${RESET}\n" "$n"
+  else
+    printf "  ${RED}${DOT}${RESET} Устройство НЕ найдено / драйвер не установлен\n"
+  fi
+}
+
+# ---------- actions ----------
+do_list() {
+  title_box "СПИСОК ОТПЕЧАТКОВ" "fprintd-list"
+  printf "\n"
+  if ! detect_device; then
+    err "Устройство не доступно."
+    foot_box; return
+  fi
+  local out idx ru
+  out=$(fprintd-list "$USER" 2>&1)
+  local devline
+  devline=$(echo "$out" | grep -i "Device at" | head -1)
+  [[ -n "$devline" ]] && { info "$devline"; printf "\n"; }
+  nl=0
+  while IFS= read -r l; do
+    l="$(echo "$l" | sed -E 's/^ +- +//')"
+    [[ -z "$l" || "$l" == "Device at"* || "$l" == "Using device"* || "$l" == *"no fingers"* ]] && continue
+    if [[ "$l" == "Fingerprints"* ]]; then
+      printf "  ${CYAN}${l}${RESET}\n"
+      continue
+    fi
+    name="${l%%:*}"
+    found=0
+    for i in "${!FINGER_NAMES[@]}"; do
+      if [[ "$name" == "${FINGER_NAMES[$i]}" ]]; then
+        printf "  ${GREEN}${CHECK}${RESET} ${POINT} ${BOLD}%-22s${RESET} ${DIM}%s${RESET}\n" "${FINGER_RU[$i]}" "$l"
+        found=1; break
+      fi
+    done
+    [[ $found -eq 0 ]] && printf "  ${GREEN}${CHECK}${RESET} ${POINT} %s\n" "$l"
+  done <<< "$out"
+  foot_box
+}
+
+do_enroll() {
+  local idx="$1"
+  local ename="${FINGER_NAMES[$idx]}" urname="${FINGER_RU[$idx]}"
+  title_box "ДОБАВИТЬ ОТПЕЧАТОК" "$ename - $urname"
+  printf "\n"
+  if ! detect_device; then
+    err "Устройство не доступно."
+    foot_box; return
+  fi
+  info "Прикладывай палец ${BOLD}$urname${RESET} ($ename) несколько раз."
+  info "Датчик Press-типа: короткое прижатие (не скролл), до сбора кадра."
+  printf "\n  ${YELLOW}${ARRC}${RESET} Начинаю запись...\n\n"
+  # enroll от текущего пользователя (polkit разрешает свой отпечаток);
+  # при полит-ошибке — повторяем через sudo
+  fprintd-enroll -f "$ename"
+  local rc=$?
+  if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+    warn "Попытка через sudo (может запросить пароль)..."
+    sudo fprintd-enroll -f "$ename"
+    rc=$?
+  fi
+  printf "\n"
+  if [[ $rc -eq 0 ]]; then
+    msg "Отпечаток $urname записан."
+  else
+    err "Запись прервана (код $rc)."
+  fi
+  foot_box
+}
+
+do_verify() {
+  title_box "ПРОВЕРИТЬ ОТПЕЧАТОК" "fprintd-verify"
+  printf "\n"
+  if ! detect_device; then
+    err "Устройство не доступно."
+    foot_box; return
+  fi
+  info "Приложи зарегистрированный палец для проверки."
+  printf "\n  ${YELLOW}${ARRC}${RESET} Проверяю...\n\n"
+  fprintd-verify
+  local rc=$?
+  printf "\n"
+  if [[ $rc -eq 0 ]]; then
+    msg "Совпадение! Отпечаток подтверждён."
+  else
+    err "Нет совпадения (код $rc)."
+  fi
+  foot_box
+}
+
+do_delete_one() {
+  local idx="$1"
+  local ename="${FINGER_NAMES[$idx]}" urname="${FINGER_RU[$idx]}"
+  title_box "УДАЛИТЬ ОТПЕЧАТОК" "$ename - $urname"
+  printf "\n"
+  if ! detect_device; then
+    err "Устройство не доступно."
+    foot_box; return
+  fi
+  printf "  ${YELLOW}${ARRC}${RESET} Удалить ${BOLD}$urname${RESET}? [y/N] "
+  read -r ans
+  if [[ "${ans:-n}" =~ ^[yYдД]$ ]]; then
+    if ! require_2fa; then
+      err "Операция отменена (2FA не пройдена)."
+      foot_box; return
+    fi
+    sudo fprintd-delete -f "$ename" && msg "Удалён." || err "Не удалось удалить."
+  else
+    info "Отменено."
+  fi
+  foot_box
+}
+
+do_delete_all() {
+  title_box "УДАЛИТЬ ВСЕ ОТПЕЧАТКИ" "полная очистка"
+  printf "\n"
+  if ! detect_device; then
+    err "Устройство не доступно."
+    foot_box; return
+  fi
+  printf "  ${RED}${ARRC}${RESET} Точно удалить ${BOLD}ВСЕ${RESET} отпечатки? [y/N] "
+  read -r ans
+  if [[ "${ans:-n}" =~ ^[yYдД]$ ]]; then
+    if ! require_2fa; then
+      err "Операция отменена (2FA не пройдена)."
+      foot_box; return
+    fi
+    for ename in "${FINGER_NAMES[@]}"; do
+      sudo fprintd-delete -f "$ename" 2>/dev/null
+      printf "  ${DIM}› удалён: %s${RESET}\n" "$ename"
+    done
+    msg "Готово."
+  else
+    info "Отменено."
+  fi
+  foot_box
+}
+
+do_pam() {
+  title_box "PAM / СИСТЕМНАЯ ИНТЕГРАЦИЯ" "статус настроек"
+  printf "\n"
+  local files=("/etc/pam.d/system-auth" "/etc/pam.d/sudo" "/etc/pam.d/su" "/etc/pam.d/hyprlock" "/etc/pam.d/omarchy-lock-fingerprint")
+  for f in "${files[@]}"; do
+    if [[ -f "$f" ]] && grep -q "pam_fprintd" "$f" 2>/dev/null; then
+      msg "${f}  → отпечаток активен"
+    else
+      warn "${f}  → pam_fprintd отсутствует"
+    fi
+  done
+  printf "\n"
+  info "Хочешь добавить pam_fprintd в отсутствующие файлы? [y/N] "
+  read -r ans
+  if [[ "${ans:-n}" =~ ^[yYдД]$ ]]; then
+    for f in "${files[@]}"; do
+      if [[ -f "$f" ]] && ! grep -q "pam_fprintd" "$f" 2>/dev/null; then
+        sudo sed -i '2i auth sufficient pam_fprintd.so' "$f" && msg "добавлено в ${f}"
+      elif [[ ! -f "$f" && "${f##*/}" != *"omarchy"* ]]; then
+        case "${f##*/}" in
+          sudo) printf 'auth sufficient pam_fprintd.so\nauth include system-auth\n' | sudo tee -a "$f" >/dev/null && msg "создан ${f}" ;;
+          su)   printf 'auth sufficient pam_fprintd.so\nauth include system-auth\n' | sudo tee -a "$f" >/dev/null && msg "создан ${f}" ;;
+        esac
+      fi
+    done
+  fi
+  foot_box
+}
+
+# ---------- finger picker ----------
+pick_finger() {
+  local menu msg="$1"
+  printf "\n"
+  for i in "${!FINGER_NAMES[@]}"; do
+    printf "  ${BOLD}%s${RESET}. %s\n" "$((i+1))" "${FINGER_RU[$i]}"
+  done
+  printf "  ${BOLD}0${RESET}. Назад\n"
+  printf "\n  ${YELLOW}${ARRC}${RESET} $msg [1-10, 0] "
+  read -r sel
+  if [[ "$sel" =~ ^[0-9]+$ && "$sel" -ge 1 && "$sel" -le 10 ]]; then
+    return $((sel-1))
+  fi
+  return 255
+}
+
+# 2FA для критичных операций: пароль sudo + отпечаток
+require_2fa() {
+  printf "\n  ${DIM}── // двухфакторное подтверждение // ──${RESET}\n"
+  if ! sudo -v 2>/dev/null; then
+    err "Неверный пароль sudo / нет прав."
+    return 1
+  fi
+  msg "Фактор 1 (sudo) — пройден."
+  if ! detect_device; then
+    err "Устройство отпечатков не доступно."
+    return 1
+  fi
+  printf "  ${YELLOW}${ARRC}${RESET} Приложи зарегистрированный палец...\n\n"
+  fprintd-verify
+  local rc=$?
+  printf "\n"
+  if [[ $rc -ne 0 ]]; then
+    err "Фактор 2 не пройден: отпечаток не подтверждён."
+    return 1
+  fi
+  msg "Фактор 2 (отпечаток) — пройден."
+  return 0
+}
+
+# ---------- main ----------
+main() {
+  for c in "${REQUIRED_CMDS[@]}"; do
+    if ! command -v "$c" >/dev/null 2>&1; then
+      echo "" >&2
+      printf "${RED}${CROSS}${RESET} Нет команды ${BOLD}%s${RESET}: установи пакеты fprintd-clients.\n" "$c" >&2
+      printf "  sudo pacman -S fprintd  (или yay -S fprintd-clients-git)\n" >&2
+      exit 1
+    fi
+  done
+
+  # ---- 2FA: пароль sudo + отпечаток ----
+  clear
+  title_box "ДВУХФАКТОРНАЯ АУТЕНТИФИКАЦИЯ" "fingerprint — доступ"
+  printf "\n"
+  info "Для входа нужны ОБА фактора:"
+  printf "  ${BOLD}1)${RESET} пароль sudo\n"
+  printf "  ${BOLD}2)${RESET} отпечаток пальца\n\n"
+
+  # Фактор 1: sudo
+  if ! sudo -v 2>/dev/null; then
+    err "Фактор 1 не пройден: неверный пароль sudo / нет прав."
+    foot_box; exit 1
+  fi
+  msg "Фактор 1 (sudo) — пройден."
+  printf "\n"
+
+  # Фактор 2: отпечаток
+  if ! detect_device; then
+    err "Устройство отпечатков не доступно — фактор 2 не пройден."
+    foot_box; exit 1
+  fi
+  printf "  ${YELLOW}${ARRC}${RESET} Приложи зарегистрированный палец...\n\n"
+  fprintd-verify
+  local rc=$?
+  printf "\n"
+  if [[ $rc -ne 0 ]]; then
+    err "Фактор 2 не пройден: отпечаток не подтверждён."
+    foot_box; exit 1
+  fi
+  msg "Фактор 2 (отпечаток) — пройден."
+  printf "\n"
+  pause
+
+  while true; do
+    clear
+    title_box "FINGERPRINT" "fingerprint — Goodix / fprintd"
+    banner_status
+    hr "$W"; printf "\n"
+    menu_line 1 "Список отпечатков"
+    menu_line 2 "Добавить отпечаток"
+    menu_line 3 "Проверить отпечаток"
+    menu_line 4 "Удалить отпечаток"
+    menu_line 5 "Удалить все отпечатки"
+    menu_line 6 "PAM / системная интеграция"
+    menu_line 0 "Выход"
+    printf "\n"
+    foot_box
+    printf "  ${YELLOW}${ARRC}${RESET} Выбери: "
+    read -r ch
+
+    case "$ch" in
+      1) do_list; pause ;;
+      2) if pick_finger "Какой палец записать?"; then do_enroll "$?"; pause; fi ;;
+      3) do_verify; pause ;;
+      4) if pick_finger "Какой палец удалить?"; then do_delete_one "$?"; pause; fi ;;
+      5) do_delete_all; pause ;;
+      6) do_pam; pause ;;
+      0) printf "\n  ${DIM}Пока!${RESET}\n\n"; exit 0 ;;
+      *) warn "Неверный выбор."; pause ;;
+    esac
+  done
+}
+
+main "$@"

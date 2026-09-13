@@ -1,0 +1,766 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""Fingerprint — менеджер отпечатков пальцев (GTK3, компактный, тёмный).
+
+Поверх fprintd (пакет fprintd-clients): список, добавление, проверка,
+удаление отпечатков, PAM-интеграция.
+
+Добавление/удаление запрашивают ТОЛЬКО пароль sudo (без отпечатка),
+поэтому после «Удалить все отпечатки» приложение продолжает работать.
+"""
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+
+from gi.repository import Gtk, GLib, Gdk
+
+import os
+import queue
+import re
+import subprocess
+import threading
+
+USER = os.environ.get("USER") or os.environ.get("LOGNAME") or "resty"
+
+APP_TITLE = "Fingerprint"
+APP_ICON = "fingerprint"
+
+FINGER_NAMES = (
+    "left-thumb", "left-index-finger", "left-middle-finger",
+    "left-ring-finger", "left-little-finger",
+    "right-thumb", "right-index-finger", "right-middle-finger",
+    "right-ring-finger", "right-little-finger",
+)
+FINGER_RU = (
+    "Большой (левый)", "Указательный (левый)", "Средний (левый)",
+    "Безымянный (левый)", "Мизинец (левый)",
+    "Большой (правый)", "Указательный (правый)", "Средний (правый)",
+    "Безымянный (правый)", "Мизинец (правый)",
+)
+
+SUDO_CMD = "sudo"
+PAM_FILES = (
+    "/etc/pam.d/system-auth",
+    "/etc/pam.d/sudo",
+    "/etc/pam.d/su",
+    "/etc/pam.d/hyprlock",
+    "/etc/pam.d/omarchy-lock-fingerprint",
+)
+
+PAM_LABELS = {
+    "/etc/pam.d/system-auth": "Системная аутентификация",
+    "/etc/pam.d/sudo": "sudo",
+    "/etc/pam.d/su": "su",
+    "/etc/pam.d/hyprlock": "Экранная блокировка (hyprlock)",
+    "/etc/pam.d/omarchy-lock-fingerprint": "Блокировка Omarchy",
+}
+
+DARK_CSS = b"""
+window#fingerprint-win { background-color:#0d0d0f; color:#e8e8ec; }
+window#fingerprint-win label { color:#e8e8ec; }
+button {
+  background-color:#1c1c21; color:#e8e8ec;
+  border:2px solid #22d3ee; border-radius:12px;
+  padding:12px 8px; font-weight:bold;
+  background-image:none; text-shadow:none;
+  box-shadow:none;
+}
+button:hover { background-color:#27272f; border-color:#ffffff; }
+button:active { background-color:#2f3342; }
+button:disabled { opacity:0.35; }
+button#verifybtn  { border-color:#34d399; }
+button#delbtn     { border-color:#fbbf24; }
+button#delallbtn  { border-color:#f87171; }
+button#pambtn     { border-color:#c084fc; }
+button#pamok      { border-color:#34d399; }
+button#pamno      { border-color:#fbbf24; }
+menu, .menu, popover { background-color:#0d0d0f; color:#e8e8ec; border:none; }
+menuitem, .menuitem { background-color:#0d0d0f; color:#e8e8ec;
+                      padding:7px 16px; border:none; }
+menuitem:hover, .menuitem:hover { background-color:#22d3ee; color:#0d0d0f; }
+"""
+
+
+# ---------- подпроцессы ----------
+
+def run(args, password=None, stdin_text=None, timeout=300):
+    """Запуск команды. Если задан password — через `sudo -S`.
+    stdin_text передаётся в конце stdin (после строки пароля sudo)."""
+    data = ""
+    if password is not None:
+        data += password + "\n"
+    if stdin_text:
+        data += stdin_text
+    if password is not None or stdin_text is not None:
+        return subprocess.run([SUDO_CMD, "-S"] + list(args),
+                              capture_output=True, text=True,
+                              input=data, timeout=timeout)
+    return subprocess.run(list(args), capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def query_fingers():
+    """Возвращает (device, список имён отпечатков, доступно_устройство)."""
+    device, names, ok = None, [], False
+    try:
+        p = run(["fprintd-list", USER], timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return "", [], False
+    txt = p.stdout + p.stderr
+    if "Device at" in txt and "No devices" not in txt and "not found" not in txt.lower():
+        ok = True
+    m = re.search(r"Fingerprints for user \S+ on (.+?):", txt)
+    if m:
+        device = m.group(1).strip()
+    if not device:
+        for line in txt.splitlines():
+            if "Device at" in line:
+                device = "Устройство отпечатков"
+                break
+    for line in txt.splitlines():
+        s = line.strip()
+        mm = re.fullmatch(r"-\s+#\d+:\s*(\S+)", s)
+        if mm and mm.group(1) not in names:
+            names.append(mm.group(1))
+            continue
+        mm = re.fullmatch(r"-\s+(left-[a-z-]+|right-[a-z-]+)", s)
+        if mm and mm.group(1) not in names:
+            names.append(mm.group(1))
+    return device or "Устройство отпечатков", names, ok
+
+
+def stderr_tail(p):
+    tail = (p.stderr or p.stdout or "").strip()
+    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    return "\n".join(lines[-4:]) or "подробности в терминале"
+
+
+def have_device():
+    return query_fingers()[2]
+
+
+# ---------- фоновая работа ----------
+
+class AsyncJob:
+    def __init__(self, worker, on_done):
+        self._fn = worker
+        self._on_done = on_done
+
+    def start(self):
+        threading.Thread(target=self._worker_, daemon=True).start()
+
+    def _worker_(self):
+        try:
+            res = self._fn()
+        except Exception as exc:  # noqa: BLE001
+            res = exc
+        GLib.idle_add(lambda: self._on_done(res))
+        return res
+
+
+# ---------- второй уровень: выбор пальца ----------
+
+class FingerPickerWindow(Gtk.ApplicationWindow):
+    def __init__(self, app, parent, title, subtitle, on_pick):
+        super().__init__(application=app, title=title, resizable=False,
+                         icon_name=APP_ICON, transient_for=parent,
+                         modal=True, destroy_with_parent=True)
+        self.set_name("fingerprint-win")
+        self._on_pick = on_pick
+
+        hb = Gtk.HeaderBar()
+        hb.set_show_close_button(True)
+        hb.props.title = title
+        self.set_titlebar(hb)
+
+        grid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True,
+                        row_spacing=8, column_spacing=8)
+        for i in range(len(FINGER_NAMES)):
+            b = Gtk.Button(label=str(i + 1))
+            b.set_name("fingerbtn")
+            b.set_tooltip_text(FINGER_RU[i])
+            b.connect("clicked", lambda _w, idx=i: self._pick(idx))
+            grid.attach(b, i % 2, i // 2, 1, 1)
+
+        sub_lbl = Gtk.Label(label=subtitle, xalign=0)
+        back = Gtk.Button(label="← Назад")
+        back.set_name("backbtn")
+        back.connect("clicked", lambda _w: self._close())
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.set_margin_top(12)
+        vbox.set_margin_bottom(12)
+        vbox.set_margin_start(14)
+        vbox.set_margin_end(14)
+        vbox.pack_start(sub_lbl, False, False, 0)
+        vbox.pack_start(grid, True, True, 0)
+        vbox.pack_start(back, False, False, 0)
+        self.add(vbox)
+        self.show_all()
+
+    def _pick(self, idx):
+        self.destroy()
+        self._on_pick(idx)
+
+    def _close(self):
+        self.destroy()
+
+
+# ---------- окно ----------
+
+class FingerWindow(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title=APP_TITLE,
+                         default_width=400, default_height=250,
+                         resizable=False, icon_name=APP_ICON)
+        self._active_proc = None
+        self._busy = False
+        self._closed = False
+        self._pam_rows_by_path = {}
+        self.set_name("fingerprint-win")
+        self.connect("destroy", self._on_destroy)
+
+        hb = Gtk.HeaderBar()
+        hb.set_show_close_button(True)
+        hb.props.title = APP_TITLE
+        self.set_titlebar(hb)
+
+        btn_refresh = Gtk.Button.new_from_icon_name(
+            "view-refresh-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
+        btn_refresh.set_tooltip_text("Обновить список отпечатков")
+        btn_refresh.connect("clicked", lambda *_: self.refresh())
+        hb.pack_start(btn_refresh)
+
+        self._count_lbl = Gtk.Label()
+        self._count_lbl.get_style_context().add_class("dim-label")
+        hb.pack_end(self._count_lbl)
+
+        self._btn_add = self._action_btn("Добавить отпечаток", "addbtn",
+                                         self._on_open_add)
+        self._btn_verify = self._action_btn("Проверить отпечаток",
+                                            "verifybtn", self._on_verify)
+        self._btn_del = self._action_btn("Удалить отпечаток", "delbtn",
+                                         self._on_open_del)
+
+        self._btn_del_all = self._action_btn("Удалить все",
+                                             "delallbtn", self._on_delete_all)
+        self._btn_pam = self._action_btn("PAM / система", "pambtn",
+                                         self._on_pam)
+
+        grid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True,
+                        row_spacing=10, column_spacing=10)
+        grid.attach(self._btn_add, 0, 0, 1, 1)
+        grid.attach(self._btn_verify, 1, 0, 1, 1)
+        grid.attach(self._btn_del, 0, 1, 1, 1)
+        grid.attach(self._btn_del_all, 1, 1, 1, 1)
+        grid.attach(self._btn_pam, 0, 2, 2, 1)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        vbox.set_margin_top(14)
+        vbox.set_margin_bottom(14)
+        vbox.set_margin_start(14)
+        vbox.set_margin_end(14)
+        vbox.pack_start(grid, True, True, 0)
+        self.add(vbox)
+
+        self.apply_theme()
+        self.refresh()
+        self.show_all()
+
+    # ---------- стиль / построение ----------
+
+    def apply_theme(self):
+        provider = Gtk.CssProvider()
+        provider.load_from_data(DARK_CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER + 10)
+
+    def _action_btn(self, label, name, handler):
+        b = Gtk.Button(label=label)
+        b.set_name(name)
+        b.connect("clicked", handler)
+        return b
+
+    def _open_picker(self, title, subtitle, cb):
+        FingerPickerWindow(self.get_application(), self,
+                           title, subtitle, cb)
+
+    def _on_open_add(self, *_):
+        if self._busy:
+            return
+        self._open_picker("Добавить отпечаток",
+                          "Выберите палец для записи",
+                          self._on_pick_add)
+
+    def _on_open_del(self, *_):
+        if self._busy:
+            return
+        self._open_picker("Удалить отпечаток",
+                          "Выберите палец для удаления",
+                          self._on_pick_del)
+
+    def _on_destroy(self, *_):
+        self._closed = True
+        proc = self._active_proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ---------- данные ----------
+
+    def refresh(self):
+        _dev, names, ok = query_fingers()
+        self._count_lbl.set_text(f"Отпечатков: {len(names)}")
+        for b in (self._btn_add, self._btn_del,
+                  self._btn_verify, self._btn_del_all):
+            b.set_sensitive(ok)
+
+    # ---------- диалоги ----------
+
+    def _msg(self, title, text, mtype=Gtk.MessageType.INFO):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=mtype, buttons=Gtk.ButtonsType.OK)
+        dlg.set_title(title)
+        dlg.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>\n\n"
+                       f"{GLib.markup_escape_text(text)}")
+        dlg.run()
+        dlg.destroy()
+
+    def _confirm(self, text):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.QUESTION,
+                                buttons=Gtk.ButtonsType.YES_NO)
+        dlg.set_title("Подтверждение")
+        dlg.set_markup(f"<b>{GLib.markup_escape_text(text)}</b>")
+        resp = dlg.run()
+        dlg.destroy()
+        return resp == Gtk.ResponseType.YES
+
+    def ask_password(self, title, explanation="", hint=""):
+        dlg = Gtk.Dialog(title, self, Gtk.DialogFlags.MODAL,
+                         ("Отмена", Gtk.ResponseType.CANCEL,
+                          "Продолжить", Gtk.ResponseType.OK))
+        box = dlg.get_content_area()
+        if explanation:
+            lbl = Gtk.Label(label=explanation, xalign=0)
+            box.pack_start(lbl, False, False, 4)
+        entry = Gtk.Entry()
+        entry.set_visibility(False)
+        entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        entry.set_activates_default(True)
+        box.pack_start(entry, False, False, 4)
+        if hint:
+            hlbl = Gtk.Label(label=hint, xalign=0)
+            hlbl.set_halign(Gtk.Align.START)
+            hlbl.get_style_context().add_class("dim-label")
+            box.pack_start(hlbl, False, False, 4)
+        box.show_all()
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        entry.grab_focus()
+        resp = dlg.run()
+        pw = entry.get_text() if resp == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        return pw
+
+    def _progress(self, title, text):
+        dlg = Gtk.Dialog(title, self, Gtk.DialogFlags.MODAL, ())
+        spinner = Gtk.Spinner()
+        spinner.props.hexpand = True
+        lbl = Gtk.Label(label=text, xalign=0)
+        box = dlg.get_content_area()
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.pack_start(spinner, False, False, 0)
+        box.pack_start(lbl, False, False, 8)
+        box.show_all()
+        spinner.start()
+        return dlg
+
+    # ---------- добавление ----------
+
+    def _on_pick_add(self, idx):
+        if self._busy:
+            return
+        if not have_device():
+            self._msg("Устройство не найдено",
+                      "Драйвер отпечатков не установлен или датчик отключён.",
+                      Gtk.MessageType.ERROR)
+            return
+        self._enroll(FINGER_NAMES[idx], FINGER_RU[idx], password=None)
+
+    def _enroll(self, fname, ru, password):
+        self._busy = True
+        dlg = self._progress(
+            "Запись отпечатка",
+            f"«{ru}»\n\n"
+            "Прикладывайте палец несколько раз.\n"
+            "Датчик press-типа: короткое прижатие (не скролл).\n"
+            "Не убирайте палец до сигнала готовности.")
+        self._active_proc = None
+
+        def worker():
+            cmd = ["timeout", "180"]
+            if password is not None:
+                cmd += ["sudo", "-S"]
+            cmd += ["fprintd-enroll", "-u", USER, "-f", fname]
+            data = (password + "\n") if password is not None else None
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE if data is not None else None,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self._active_proc = proc
+            out, _ = proc.communicate(input=data)
+            self._active_proc = None
+            return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                               out, "")
+
+        def done(p):
+            GLib.idle_add(self._enroll_done, dlg, fname, ru, p,
+                          password is not None)
+
+        AsyncJob(worker, done).start()
+
+    def _enroll_done(self, dlg, fname, ru, p, used_password):
+        try:
+            dlg.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        self._busy = False
+        if self._closed:
+            return
+        if isinstance(p, Exception):
+            self._msg("Ошибка", f"Не удалось запустить запись: {p}",
+                      Gtk.MessageType.ERROR)
+            return
+        if p.returncode == 0:
+            self._msg("Отпечаток записан",
+                      f"«{ru}» ({fname}) сохранён для пользователя {USER}.")
+            self.refresh()
+            return
+        if not used_password:
+            pw = self.ask_password(
+                "Пароль для записи",
+                f"Запись «{ru}» для пользователя {USER}.",
+                "Нужен только пароль sudo (отпечаток не требуется).")
+            if pw is not None:
+                self._enroll(fname, ru, password=pw)
+            else:
+                self._msg("Отмена", "Запись отменена.",
+                          Gtk.MessageType.WARNING)
+            return
+        self._msg("Ошибка", f"Отпечаток не записан.\n{stderr_tail(p)}",
+                  Gtk.MessageType.ERROR)
+
+    # ---------- проверка ----------
+
+    def _on_verify(self, *_):
+        if self._busy:
+            return
+        if not have_device():
+            self._msg("Устройство не найдено",
+                      "Драйвер отпечатков не установлен.",
+                      Gtk.MessageType.ERROR)
+            return
+        self._busy = True
+        dlg = self._progress(
+            "Проверка отпечатка",
+            "Приложите зарегистрированный палец к датчику.\n"
+            "Ожидание — до 20 секунд.")
+        self._active_proc = None
+
+        def worker():
+            proc = subprocess.Popen(
+                ["timeout", "20", "fprintd-verify"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self._active_proc = proc
+            out, _ = proc.communicate()
+            self._active_proc = None
+            return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                               out, "")
+
+        def done(p):
+            GLib.idle_add(self._verify_done, dlg, p)
+
+        AsyncJob(worker, done).start()
+
+    def _verify_done(self, dlg, p):
+        try:
+            dlg.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        self._busy = False
+        if self._closed:
+            return
+        if isinstance(p, Exception):
+            self._msg("Ошибка", f"Не удалось запустить проверку: {p}",
+                      Gtk.MessageType.ERROR)
+            return
+        if p.returncode == 0:
+            self._msg("Результат", "Совпадение! Отпечаток подтверждён.")
+        else:
+            self._msg("Результат", "Нет совпадения.",
+                      Gtk.MessageType.WARNING)
+
+    # ---------- удаление ----------
+
+    def _on_pick_del(self, idx):
+        if self._busy:
+            return
+        if not have_device():
+            self._msg("Устройство не найдено",
+                      "Драйвер отпечатков не установлен.",
+                      Gtk.MessageType.ERROR)
+            return
+        fname, ru = FINGER_NAMES[idx], FINGER_RU[idx]
+        if not self._confirm(f"Удалить отпечаток «{ru}»?"):
+            return
+        pw = self.ask_password(
+            "Пароль для удаления",
+            f"Удаление «{ru}» для пользователя {USER}.",
+            "Отпечаток запрашивать НЕ нужно.")
+        if pw is None:
+            return
+        self._busy = True
+        try:
+            p = run(["fprintd-delete", "-u", USER, "-f", fname], password=pw)
+        except Exception as exc:  # noqa: BLE001
+            self._busy = False
+            self._msg("Ошибка", f"Не удалось удалить: {exc}",
+                      Gtk.MessageType.ERROR)
+            return
+        self._busy = False
+        if p.returncode == 0:
+            self._msg("Готово", f"Отпечаток «{ru}» удалён.")
+            self.refresh()
+        else:
+            self._msg("Ошибка", f"Отпечаток не удалён.\n{stderr_tail(p)}",
+                      Gtk.MessageType.ERROR)
+
+    def _on_delete_all(self, *_):
+        if self._busy:
+            return
+        if not self._confirm(
+                "Удалить ВСЕ отпечатки?\n\nЭто действие нельзя отменить."):
+            return
+        pw = self.ask_password(
+            "Пароль для удаления всех",
+            "Требуется только пароль sudo.",
+            "Отпечаток запрашивать НЕ нужно.")
+        if pw is None:
+            return
+        self._busy = True
+        removed = []
+        for fname in FINGER_NAMES:
+            try:
+                p = run(["fprintd-delete", "-u", USER, "-f", fname],
+                        password=pw)
+                if (isinstance(p, subprocess.CompletedProcess)
+                        and p.returncode == 0):
+                    removed.append(fname)
+            except Exception:  # noqa: BLE001
+                continue
+        self._busy = False
+        if removed:
+            self._msg("Готово",
+                      f"Удалено отпечатков: {len(removed)} из "
+                      f"{len(FINGER_NAMES)}.")
+            self.refresh()
+        else:
+            self._msg("Готово", "Ничего не удалено.",
+                      Gtk.MessageType.INFO)
+
+    # ---------- PAM ----------
+
+    def _pam_active(self, f):
+        if not os.path.exists(f):
+            return False
+        try:
+            content = open(f, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return False
+        return "pam_fprintd" in content
+
+    def _pam_configure(self, files):
+        """Настраивает список файлов. Возвращает (added, failed)."""
+        if not files:
+            return [], []
+        names = ", ".join(PAM_LABELS.get(f, f) for f in files)
+        pw = self.ask_password(
+            "Пароль для PAM",
+            f"Включить отпечаток: {names}.",
+            "Нужен только пароль sudo.")
+        if pw is None:
+            return None, None
+        added, failed = [], []
+        for f in files:
+            try:
+                if os.path.exists(f):
+                    p = run(["sed", "-i",
+                             "2i auth sufficient pam_fprintd.so", f],
+                            password=pw)
+                elif os.path.basename(f) in ("sudo", "su"):
+                    p = run(["tee", f], password=pw,
+                            stdin_text="auth sufficient pam_fprintd.so\n"
+                                       "auth include system-auth\n")
+                else:
+                    continue
+                if (isinstance(p, subprocess.CompletedProcess)
+                        and p.returncode == 0):
+                    added.append(f)
+                else:
+                    failed.append(f)
+            except Exception:  # noqa: BLE001
+                failed.append(f)
+        return added, failed
+
+    def _make_pam_row(self, f):
+        active = self._pam_active(f)
+        b = Gtk.Button()
+        b.set_name("pamok" if active else "pamno")
+        b.set_hexpand(True)
+        inner = Gtk.Box(spacing=8)
+        lbl_name = Gtk.Label(label=PAM_LABELS.get(f, f), xalign=0)
+        lbl_name.set_hexpand(True)
+        lbl_status = Gtk.Label(label="включено" if active else "выключено",
+                               xalign=1)
+        lbl_status.get_style_context().add_class("dim-label")
+        inner.pack_start(lbl_name, True, True, 0)
+        inner.pack_start(lbl_status, False, False, 0)
+        b.add(inner)
+        b.connect("clicked", self._pam_toggle, f)
+        return b
+
+    def _pam_update_row(self, row, status_lbl):
+        active = self._pam_active(row.path)
+        row.set_name("pamok" if active else "pamno")
+        status_lbl.set_text("включено" if active else "выключено")
+
+    def _on_pam(self, *_):
+        dlg = Gtk.Dialog("PAM / система", self,
+                         Gtk.DialogFlags.MODAL,
+                         ("Закрыть", Gtk.ResponseType.CLOSE))
+        box = dlg.get_content_area()
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        vbox.set_margin_top(12)
+        vbox.set_margin_bottom(12)
+        vbox.set_margin_start(14)
+        vbox.set_margin_end(14)
+
+        hint = Gtk.Label(
+            label="Где отпечаток уже используется — зелёная рамка. "
+                  "Нажмите на пункт, чтобы включить его.",
+            xalign=0)
+        hint.set_halign(Gtk.Align.START)
+        hint.get_style_context().add_class("dim-label")
+        hint.set_line_wrap(True)
+        vbox.pack_start(hint, False, False, 0)
+
+        rows = []
+        for f in PAM_FILES:
+            row = self._make_pam_row(f)
+            row.path = f
+            self._pam_rows_by_path[f] = row
+            vbox.pack_start(row, False, False, 0)
+            rows.append(row)
+
+        btn_all = Gtk.Button(label="Включить отпечаток во всех")
+        btn_all.set_name("pamallbtn")
+        btn_all.connect("clicked", self._pam_enable_all, dlg, rows)
+
+        cnt = Gtk.Label()
+        cnt.get_style_context().add_class("dim-label")
+        cnt.set_halign(Gtk.Align.START)
+
+        vbox.pack_start(btn_all, False, False, 4)
+        vbox.pack_start(cnt, False, False, 0)
+        box.pack_start(vbox, True, True, 0)
+
+        self._pam_refresh_counter(cnt, rows)
+        box.show_all()
+        dlg.run()
+        dlg.destroy()
+
+    def _pam_refresh_counter(self, cnt, rows):
+        active = sum(1 for r in rows if self._pam_row_active(r))
+        cnt.set_text(f"Включено: {active} из {len(rows)}")
+
+    def _pam_row_active(self, row):
+        return row.get_name() == "pamok"
+
+    def _status_label(self, row):
+        return row.get_children()[0].get_children()[1]
+
+    def _pam_toggle(self, _b, f):
+        row = self._pam_rows_by_path.get(f)
+        if self._pam_active(f):
+            self._msg("Уже включено",
+                      f"Отпечаток активен: {PAM_LABELS.get(f, f)}.",
+                      Gtk.MessageType.INFO)
+            return
+        added, failed = self._pam_configure([f])
+        if added is None:
+            return
+        if added:
+            if row is not None:
+                self._pam_update_row(row, self._status_label(row))
+            self.refresh()
+            self._msg("Готово", f"Отпечаток включён: "
+                      f"{PAM_LABELS.get(f, f)}.")
+        if failed:
+            self._msg("Ошибка",
+                      f"Не удалось настроить: {PAM_LABELS.get(f, f)}.",
+                      Gtk.MessageType.ERROR)
+
+    def _pam_enable_all(self, _b, dlg, rows):
+        missing = [f for f, row in
+                   zip(PAM_FILES, rows) if not self._pam_row_active(row)]
+        if not missing:
+            self._msg("Готово", "Отпечаток включён везде.",
+                      Gtk.MessageType.INFO)
+            return
+        added, failed = self._pam_configure(missing)
+        if added is None:
+            return
+        for f in added:
+            row = self._pam_rows_by_path.get(f)
+            if row is not None:
+                self._pam_update_row(row, self._status_label(row))
+        self.refresh()
+        if added:
+            self._msg("Готово",
+                      "Включено:\n" + "\n".join(
+                          PAM_LABELS.get(f, f) for f in added))
+        if failed:
+            self._msg("Ошибка",
+                      "Не удалось настроить:\n" + "\n".join(failed),
+                      Gtk.MessageType.ERROR)
+
+
+class FingerApplication(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="io.github.resty.fngrmngr")
+        self._win = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        Gtk.Window.set_default_icon_name(APP_ICON)
+        settings = Gtk.Settings.get_default()
+        if settings is not None:
+            settings.props.gtk_application_prefer_dark_theme = True
+
+    def do_activate(self):
+        if self._win is not None:
+            self._win.present()
+            return
+        self._win = FingerWindow(self)
+
+
+if __name__ == "__main__":
+    app = FingerApplication()
+    app.run(None)
