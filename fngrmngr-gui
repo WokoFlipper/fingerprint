@@ -1,12 +1,12 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
-"""Fingerprint — менеджер отпечатков пальцев (GTK3, компактный, тёмный).
+"""Fingerprint — fingerprint manager (GTK3, compact, dark).
 
-Поверх fprintd (пакет fprintd-clients): список, добавление, проверка,
-удаление отпечатков, PAM-интеграция.
+On top of fprintd: list, enroll, verify,
+delete fingerprints, PAM integration.
 
-Добавление/удаление запрашивают ТОЛЬКО пароль sudo (без отпечатка),
-поэтому после «Удалить все отпечатки» приложение продолжает работать.
+Enroll/delete ask for the sudo password ONLY (no fingerprint),
+so the app keeps working after "Delete all fingerprints".
 """
 
 import gi
@@ -22,7 +22,7 @@ import re
 import subprocess
 import threading
 
-USER = os.environ.get("USER") or os.environ.get("LOGNAME") or "resty"
+USER = os.environ.get("USER") or os.environ.get("LOGNAME") or os.environ.get("USERNAME") or "user"
 
 APP_TITLE = "Fingerprint"
 APP_ICON = "fingerprint"
@@ -34,10 +34,10 @@ FINGER_NAMES = (
     "right-ring-finger", "right-little-finger",
 )
 FINGER_RU = (
-    "Большой (левый)", "Указательный (левый)", "Средний (левый)",
-    "Безымянный (левый)", "Мизинец (левый)",
-    "Большой (правый)", "Указательный (правый)", "Средний (правый)",
-    "Безымянный (правый)", "Мизинец (правый)",
+    "Thumb (left)", "Index (left)", "Middle (left)",
+    "Ring (left)", "Little (left)",
+    "Thumb (right)", "Index (right)", "Middle (right)",
+    "Ring (right)", "Little (right)",
 )
 
 SUDO_CMD = "sudo"
@@ -50,11 +50,11 @@ PAM_FILES = (
 )
 
 PAM_LABELS = {
-    "/etc/pam.d/system-auth": "Системная аутентификация",
+    "/etc/pam.d/system-auth": "System authentication",
     "/etc/pam.d/sudo": "sudo",
     "/etc/pam.d/su": "su",
-    "/etc/pam.d/hyprlock": "Экранная блокировка (hyprlock)",
-    "/etc/pam.d/omarchy-lock-fingerprint": "Блокировка Omarchy",
+    "/etc/pam.d/hyprlock": "Screen lock (hyprlock)",
+    "/etc/pam.d/omarchy-lock-fingerprint": "Omarchy lock",
 }
 
 DARK_CSS = b"""
@@ -83,11 +83,11 @@ menuitem:hover, .menuitem:hover { background-color:#22d3ee; color:#0d0d0f; }
 """
 
 
-# ---------- подпроцессы ----------
+# ---------- subprocesses ----------
 
 def run(args, password=None, stdin_text=None, timeout=300):
-    """Запуск команды. Если задан password — через `sudo -S`.
-    stdin_text передаётся в конце stdin (после строки пароля sudo)."""
+    """Run a command. If password is given — via `sudo -S`.
+    stdin_text is appended to stdin (after the sudo password line)."""
     data = ""
     if password is not None:
         data += password + "\n"
@@ -102,7 +102,7 @@ def run(args, password=None, stdin_text=None, timeout=300):
 
 
 def query_fingers():
-    """Возвращает (device, список имён отпечатков, доступно_устройство)."""
+    """Returns (device, fingerprint name list, device_available)."""
     device, names, ok = None, [], False
     try:
         p = run(["fprintd-list", USER], timeout=30)
@@ -117,7 +117,7 @@ def query_fingers():
     if not device:
         for line in txt.splitlines():
             if "Device at" in line:
-                device = "Устройство отпечатков"
+                device = "Fingerprint device"
                 break
     for line in txt.splitlines():
         s = line.strip()
@@ -128,20 +128,20 @@ def query_fingers():
         mm = re.fullmatch(r"-\s+(left-[a-z-]+|right-[a-z-]+)", s)
         if mm and mm.group(1) not in names:
             names.append(mm.group(1))
-    return device or "Устройство отпечатков", names, ok
+    return device or "Fingerprint device", names, ok
 
 
 def stderr_tail(p):
     tail = (p.stderr or p.stdout or "").strip()
     lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
-    return "\n".join(lines[-4:]) or "подробности в терминале"
+    return "\n".join(lines[-4:]) or "see terminal for details"
 
 
 def have_device():
     return query_fingers()[2]
 
 
-# ---------- фоновая работа ----------
+# ---------- background work ----------
 
 class AsyncJob:
     def __init__(self, worker, on_done):
@@ -160,7 +160,7 @@ class AsyncJob:
         return res
 
 
-# ---------- второй уровень: выбор пальца ----------
+# ---------- second level: finger picker ----------
 
 class FingerPickerWindow(Gtk.ApplicationWindow):
     def __init__(self, app, parent, title, subtitle, on_pick):
@@ -185,7 +185,7 @@ class FingerPickerWindow(Gtk.ApplicationWindow):
             grid.attach(b, i % 2, i // 2, 1, 1)
 
         sub_lbl = Gtk.Label(label=subtitle, xalign=0)
-        back = Gtk.Button(label="← Назад")
+        back = Gtk.Button(label="← Back")
         back.set_name("backbtn")
         back.connect("clicked", lambda _w: self._close())
 
@@ -208,7 +208,7 @@ class FingerPickerWindow(Gtk.ApplicationWindow):
         self.destroy()
 
 
-# ---------- окно ----------
+# ---------- window ----------
 
 class FingerWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
@@ -229,7 +229,7 @@ class FingerWindow(Gtk.ApplicationWindow):
 
         btn_refresh = Gtk.Button.new_from_icon_name(
             "view-refresh-symbolic", Gtk.IconSize.SMALL_TOOLBAR)
-        btn_refresh.set_tooltip_text("Обновить список отпечатков")
+        btn_refresh.set_tooltip_text("Refresh fingerprint list")
         btn_refresh.connect("clicked", lambda *_: self.refresh())
         hb.pack_start(btn_refresh)
 
@@ -237,16 +237,16 @@ class FingerWindow(Gtk.ApplicationWindow):
         self._count_lbl.get_style_context().add_class("dim-label")
         hb.pack_end(self._count_lbl)
 
-        self._btn_add = self._action_btn("Добавить отпечаток", "addbtn",
+        self._btn_add = self._action_btn("Enroll fingerprint", "addbtn",
                                          self._on_open_add)
-        self._btn_verify = self._action_btn("Проверить отпечаток",
+        self._btn_verify = self._action_btn("Verify fingerprint",
                                             "verifybtn", self._on_verify)
-        self._btn_del = self._action_btn("Удалить отпечаток", "delbtn",
+        self._btn_del = self._action_btn("Delete fingerprint", "delbtn",
                                          self._on_open_del)
 
-        self._btn_del_all = self._action_btn("Удалить все",
+        self._btn_del_all = self._action_btn("Delete all",
                                              "delallbtn", self._on_delete_all)
-        self._btn_pam = self._action_btn("PAM / система", "pambtn",
+        self._btn_pam = self._action_btn("PAM / system", "pambtn",
                                          self._on_pam)
 
         grid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True,
@@ -269,7 +269,7 @@ class FingerWindow(Gtk.ApplicationWindow):
         self.refresh()
         self.show_all()
 
-    # ---------- стиль / построение ----------
+    # ---------- style / layout ----------
 
     def apply_theme(self):
         provider = Gtk.CssProvider()
@@ -291,15 +291,15 @@ class FingerWindow(Gtk.ApplicationWindow):
     def _on_open_add(self, *_):
         if self._busy:
             return
-        self._open_picker("Добавить отпечаток",
-                          "Выберите палец для записи",
+        self._open_picker("Enroll fingerprint",
+                          "Select finger to enroll",
                           self._on_pick_add)
 
     def _on_open_del(self, *_):
         if self._busy:
             return
-        self._open_picker("Удалить отпечаток",
-                          "Выберите палец для удаления",
+        self._open_picker("Delete fingerprint",
+                          "Select finger to delete",
                           self._on_pick_del)
 
     def _on_destroy(self, *_):
@@ -311,16 +311,16 @@ class FingerWindow(Gtk.ApplicationWindow):
             except Exception:  # noqa: BLE001
                 pass
 
-    # ---------- данные ----------
+    # ---------- data ----------
 
     def refresh(self):
         _dev, names, ok = query_fingers()
-        self._count_lbl.set_text(f"Отпечатков: {len(names)}")
+        self._count_lbl.set_text(f"Fingerprints: {len(names)}")
         for b in (self._btn_add, self._btn_del,
                   self._btn_verify, self._btn_del_all):
             b.set_sensitive(ok)
 
-    # ---------- диалоги ----------
+    # ---------- dialogs ----------
 
     def _msg(self, title, text, mtype=Gtk.MessageType.INFO):
         dlg = Gtk.MessageDialog(transient_for=self, modal=True,
@@ -335,7 +335,7 @@ class FingerWindow(Gtk.ApplicationWindow):
         dlg = Gtk.MessageDialog(transient_for=self, modal=True,
                                 message_type=Gtk.MessageType.QUESTION,
                                 buttons=Gtk.ButtonsType.YES_NO)
-        dlg.set_title("Подтверждение")
+        dlg.set_title("Confirm")
         dlg.set_markup(f"<b>{GLib.markup_escape_text(text)}</b>")
         resp = dlg.run()
         dlg.destroy()
@@ -343,8 +343,8 @@ class FingerWindow(Gtk.ApplicationWindow):
 
     def ask_password(self, title, explanation="", hint=""):
         dlg = Gtk.Dialog(title, self, Gtk.DialogFlags.MODAL,
-                         ("Отмена", Gtk.ResponseType.CANCEL,
-                          "Продолжить", Gtk.ResponseType.OK))
+                         ("Cancel", Gtk.ResponseType.CANCEL,
+                          "Continue", Gtk.ResponseType.OK))
         box = dlg.get_content_area()
         if explanation:
             lbl = Gtk.Label(label=explanation, xalign=0)
@@ -383,14 +383,14 @@ class FingerWindow(Gtk.ApplicationWindow):
         spinner.start()
         return dlg
 
-    # ---------- добавление ----------
+    # ---------- enroll ----------
 
     def _on_pick_add(self, idx):
         if self._busy:
             return
         if not have_device():
-            self._msg("Устройство не найдено",
-                      "Драйвер отпечатков не установлен или датчик отключён.",
+            self._msg("No device found",
+                      "Fingerprint driver not installed or sensor disconnected.",
                       Gtk.MessageType.ERROR)
             return
         self._enroll(FINGER_NAMES[idx], FINGER_RU[idx], password=None)
@@ -398,11 +398,11 @@ class FingerWindow(Gtk.ApplicationWindow):
     def _enroll(self, fname, ru, password):
         self._busy = True
         dlg = self._progress(
-            "Запись отпечатка",
+            "Enrolling fingerprint",
             f"«{ru}»\n\n"
-            "Прикладывайте палец несколько раз.\n"
-            "Датчик press-типа: короткое прижатие (не скролл).\n"
-            "Не убирайте палец до сигнала готовности.")
+            "Place your finger repeatedly.\n"
+            "Press-type sensor: short presses (no swipe).\n"
+            "Do not lift your finger until ready.")
         self._active_proc = None
 
         def worker():
@@ -435,43 +435,43 @@ class FingerWindow(Gtk.ApplicationWindow):
         if self._closed:
             return
         if isinstance(p, Exception):
-            self._msg("Ошибка", f"Не удалось запустить запись: {p}",
+            self._msg("Error", f"Failed to start enrollment: {p}",
                       Gtk.MessageType.ERROR)
             return
         if p.returncode == 0:
-            self._msg("Отпечаток записан",
-                      f"«{ru}» ({fname}) сохранён для пользователя {USER}.")
+            self._msg("Fingerprint enrolled",
+                      f"«{ru}» ({fname}) saved for user {USER}.")
             self.refresh()
             return
         if not used_password:
             pw = self.ask_password(
-                "Пароль для записи",
-                f"Запись «{ru}» для пользователя {USER}.",
-                "Нужен только пароль sudo (отпечаток не требуется).")
+                "Password for enrolling",
+                f"Enrolling «{ru}» for user {USER}.",
+                "Sudo password only (no fingerprint needed).")
             if pw is not None:
                 self._enroll(fname, ru, password=pw)
             else:
-                self._msg("Отмена", "Запись отменена.",
+                self._msg("Cancelled", "Enrollment cancelled.",
                           Gtk.MessageType.WARNING)
             return
-        self._msg("Ошибка", f"Отпечаток не записан.\n{stderr_tail(p)}",
+        self._msg("Error", f"Fingerprint not enrolled.\n{stderr_tail(p)}",
                   Gtk.MessageType.ERROR)
 
-    # ---------- проверка ----------
+    # ---------- verify ----------
 
     def _on_verify(self, *_):
         if self._busy:
             return
         if not have_device():
-            self._msg("Устройство не найдено",
-                      "Драйвер отпечатков не установлен.",
+            self._msg("No device found",
+                      "Fingerprint driver not installed.",
                       Gtk.MessageType.ERROR)
             return
         self._busy = True
         dlg = self._progress(
-            "Проверка отпечатка",
-            "Приложите зарегистрированный палец к датчику.\n"
-            "Ожидание — до 20 секунд.")
+            "Verify fingerprint",
+            "Place an enrolled finger on the sensor.\n"
+            "Waiting up to 20 seconds.")
         self._active_proc = None
 
         def worker():
@@ -498,32 +498,32 @@ class FingerWindow(Gtk.ApplicationWindow):
         if self._closed:
             return
         if isinstance(p, Exception):
-            self._msg("Ошибка", f"Не удалось запустить проверку: {p}",
+            self._msg("Error", f"Failed to start verification: {p}",
                       Gtk.MessageType.ERROR)
             return
         if p.returncode == 0:
-            self._msg("Результат", "Совпадение! Отпечаток подтверждён.")
+            self._msg("Result", "Match! Fingerprint verified.")
         else:
-            self._msg("Результат", "Нет совпадения.",
+            self._msg("Result", "No match.",
                       Gtk.MessageType.WARNING)
 
-    # ---------- удаление ----------
+    # ---------- delete ----------
 
     def _on_pick_del(self, idx):
         if self._busy:
             return
         if not have_device():
-            self._msg("Устройство не найдено",
-                      "Драйвер отпечатков не установлен.",
+            self._msg("No device found",
+                      "Fingerprint driver not installed.",
                       Gtk.MessageType.ERROR)
             return
         fname, ru = FINGER_NAMES[idx], FINGER_RU[idx]
-        if not self._confirm(f"Удалить отпечаток «{ru}»?"):
+        if not self._confirm(f"Delete fingerprint «{ru}»?"):
             return
         pw = self.ask_password(
-            "Пароль для удаления",
-            f"Удаление «{ru}» для пользователя {USER}.",
-            "Отпечаток запрашивать НЕ нужно.")
+            "Password for deletion",
+            f"Deleting «{ru}» for user {USER}.",
+            "No fingerprint needed.")
         if pw is None:
             return
         self._busy = True
@@ -531,27 +531,27 @@ class FingerWindow(Gtk.ApplicationWindow):
             p = run(["fprintd-delete", "-u", USER, "-f", fname], password=pw)
         except Exception as exc:  # noqa: BLE001
             self._busy = False
-            self._msg("Ошибка", f"Не удалось удалить: {exc}",
+            self._msg("Error", f"Failed to delete: {exc}",
                       Gtk.MessageType.ERROR)
             return
         self._busy = False
         if p.returncode == 0:
-            self._msg("Готово", f"Отпечаток «{ru}» удалён.")
+            self._msg("Done", f"Fingerprint «{ru}» deleted.")
             self.refresh()
         else:
-            self._msg("Ошибка", f"Отпечаток не удалён.\n{stderr_tail(p)}",
+            self._msg("Error", f"Fingerprint not deleted.\n{stderr_tail(p)}",
                       Gtk.MessageType.ERROR)
 
     def _on_delete_all(self, *_):
         if self._busy:
             return
         if not self._confirm(
-                "Удалить ВСЕ отпечатки?\n\nЭто действие нельзя отменить."):
+                "Delete ALL fingerprints?\n\nThis cannot be undone."):
             return
         pw = self.ask_password(
-            "Пароль для удаления всех",
-            "Требуется только пароль sudo.",
-            "Отпечаток запрашивать НЕ нужно.")
+            "Password for deleting all",
+            "Sudo password only.",
+            "No fingerprint needed.")
         if pw is None:
             return
         self._busy = True
@@ -567,12 +567,12 @@ class FingerWindow(Gtk.ApplicationWindow):
                 continue
         self._busy = False
         if removed:
-            self._msg("Готово",
-                      f"Удалено отпечатков: {len(removed)} из "
+            self._msg("Done",
+                      f"Fingerprints deleted: {len(removed)} of "
                       f"{len(FINGER_NAMES)}.")
             self.refresh()
         else:
-            self._msg("Готово", "Ничего не удалено.",
+            self._msg("Done", "Nothing deleted.",
                       Gtk.MessageType.INFO)
 
     # ---------- PAM ----------
@@ -587,14 +587,14 @@ class FingerWindow(Gtk.ApplicationWindow):
         return "pam_fprintd" in content
 
     def _pam_configure(self, files):
-        """Настраивает список файлов. Возвращает (added, failed)."""
+        """Configures the file list. Returns (added, failed)."""
         if not files:
             return [], []
         names = ", ".join(PAM_LABELS.get(f, f) for f in files)
         pw = self.ask_password(
-            "Пароль для PAM",
-            f"Включить отпечаток: {names}.",
-            "Нужен только пароль sudo.")
+            "Password for PAM",
+            f"Enable fingerprint: {names}.",
+            "Sudo password only.")
         if pw is None:
             return None, None
         added, failed = [], []
@@ -627,7 +627,7 @@ class FingerWindow(Gtk.ApplicationWindow):
         inner = Gtk.Box(spacing=8)
         lbl_name = Gtk.Label(label=PAM_LABELS.get(f, f), xalign=0)
         lbl_name.set_hexpand(True)
-        lbl_status = Gtk.Label(label="включено" if active else "выключено",
+        lbl_status = Gtk.Label(label="enabled" if active else "disabled",
                                xalign=1)
         lbl_status.get_style_context().add_class("dim-label")
         inner.pack_start(lbl_name, True, True, 0)
@@ -639,12 +639,12 @@ class FingerWindow(Gtk.ApplicationWindow):
     def _pam_update_row(self, row, status_lbl):
         active = self._pam_active(row.path)
         row.set_name("pamok" if active else "pamno")
-        status_lbl.set_text("включено" if active else "выключено")
+        status_lbl.set_text("enabled" if active else "disabled")
 
     def _on_pam(self, *_):
-        dlg = Gtk.Dialog("PAM / система", self,
+        dlg = Gtk.Dialog("PAM / system", self,
                          Gtk.DialogFlags.MODAL,
-                         ("Закрыть", Gtk.ResponseType.CLOSE))
+                         ("Close", Gtk.ResponseType.CLOSE))
         box = dlg.get_content_area()
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         vbox.set_margin_top(12)
@@ -653,8 +653,8 @@ class FingerWindow(Gtk.ApplicationWindow):
         vbox.set_margin_end(14)
 
         hint = Gtk.Label(
-            label="Где отпечаток уже используется — зелёная рамка. "
-                  "Нажмите на пункт, чтобы включить его.",
+            label="Where fingerprint is already used — green frame. "
+                  "Click an item to enable it.",
             xalign=0)
         hint.set_halign(Gtk.Align.START)
         hint.get_style_context().add_class("dim-label")
@@ -669,7 +669,7 @@ class FingerWindow(Gtk.ApplicationWindow):
             vbox.pack_start(row, False, False, 0)
             rows.append(row)
 
-        btn_all = Gtk.Button(label="Включить отпечаток во всех")
+        btn_all = Gtk.Button(label="Enable fingerprint everywhere")
         btn_all.set_name("pamallbtn")
         btn_all.connect("clicked", self._pam_enable_all, dlg, rows)
 
@@ -688,7 +688,7 @@ class FingerWindow(Gtk.ApplicationWindow):
 
     def _pam_refresh_counter(self, cnt, rows):
         active = sum(1 for r in rows if self._pam_row_active(r))
-        cnt.set_text(f"Включено: {active} из {len(rows)}")
+        cnt.set_text(f"Enabled: {active} of {len(rows)}")
 
     def _pam_row_active(self, row):
         return row.get_name() == "pamok"
@@ -699,8 +699,8 @@ class FingerWindow(Gtk.ApplicationWindow):
     def _pam_toggle(self, _b, f):
         row = self._pam_rows_by_path.get(f)
         if self._pam_active(f):
-            self._msg("Уже включено",
-                      f"Отпечаток активен: {PAM_LABELS.get(f, f)}.",
+            self._msg("Already enabled",
+                      f"Fingerprint active: {PAM_LABELS.get(f, f)}.",
                       Gtk.MessageType.INFO)
             return
         added, failed = self._pam_configure([f])
@@ -710,18 +710,18 @@ class FingerWindow(Gtk.ApplicationWindow):
             if row is not None:
                 self._pam_update_row(row, self._status_label(row))
             self.refresh()
-            self._msg("Готово", f"Отпечаток включён: "
+            self._msg("Done", f"Fingerprint enabled: "
                       f"{PAM_LABELS.get(f, f)}.")
         if failed:
-            self._msg("Ошибка",
-                      f"Не удалось настроить: {PAM_LABELS.get(f, f)}.",
+            self._msg("Error",
+                      f"Failed to configure: {PAM_LABELS.get(f, f)}.",
                       Gtk.MessageType.ERROR)
 
     def _pam_enable_all(self, _b, dlg, rows):
         missing = [f for f, row in
                    zip(PAM_FILES, rows) if not self._pam_row_active(row)]
         if not missing:
-            self._msg("Готово", "Отпечаток включён везде.",
+            self._msg("Done", "Fingerprint enabled everywhere.",
                       Gtk.MessageType.INFO)
             return
         added, failed = self._pam_configure(missing)
@@ -733,12 +733,12 @@ class FingerWindow(Gtk.ApplicationWindow):
                 self._pam_update_row(row, self._status_label(row))
         self.refresh()
         if added:
-            self._msg("Готово",
-                      "Включено:\n" + "\n".join(
+            self._msg("Done",
+                      "Enabled:\n" + "\n".join(
                           PAM_LABELS.get(f, f) for f in added))
         if failed:
-            self._msg("Ошибка",
-                      "Не удалось настроить:\n" + "\n".join(failed),
+            self._msg("Error",
+                      "Failed to configure:\n" + "\n".join(failed),
                       Gtk.MessageType.ERROR)
 
 

@@ -48,13 +48,25 @@ reboot
 
 After reboot `fprintd-list "$USER"` should show the device.
 
-## Step 1. Stack
+## Quick start (one-shot per distro)
+
+```bash
+./enroll/enroll.sh
+```
+
+Detects your distro and runs the right script: deps install → finger enroll
+→ PAM enable (Arch: direct files with backups; Debian/Ubuntu: `pam-auth-update`;
+Fedora: `authselect`). Details for each path are below if you prefer manual steps.
+
+## Step 1. Stack (manual)
 
 ```bash
 # Arch
 sudo pacman -S fprintd libfprint python-gobject gtk3
 # Debian/Ubuntu
 sudo apt install fprintd libpam-fprintd python3-gi gir1.2-gtk-3.0
+# Fedora
+sudo dnf install fprintd fprintd-pam python3-gobject gtk3
 ```
 
 Check: `fprintd-list "$USER"` → device line, no fingerprints yet.
@@ -132,7 +144,8 @@ Removes the tools, menu entry and icons. Enrolled prints and PAM lines stay
 | `icons/` | App icons (SVG + 256px PNG) |
 | `install.sh` | User install (deps check + files) |
 | `uninstall.sh` | User uninstall (tools + menu entry + icons) |
-| `setup-pam.sh` | PAM enable with backups (root) |
+| `setup-pam.sh` | PAM enable with backups, Arch-style (root) |
+| `enroll/` | One-shot per-distro setup: `enroll.sh` dispatcher + `arch.sh`, `debian.sh`, `fedora.sh` |
 
 ## License
 
