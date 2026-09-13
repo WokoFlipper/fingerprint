@@ -7,9 +7,10 @@ fingerprint sensor is the same across models (see Step 0).
 
 > **Works on any Linux.** The tools are plain bash + Python/GTK and only
 > need `fprintd`, `libfprint` and `python-gobject` from your distro's
-> repositories — Arch, Debian/Ubuntu, Fedora
-> (`sudo dnf install fprintd fprintd-pam python3-gobject gtk3`), openSUSE,
-> anything. No Omarchy, no desktop-specific daemons required.
+> repositories — Arch, Debian (tested by the author on real hardware),
+> Ubuntu, Fedora (`sudo dnf install fprintd fprintd-pam python3-gobject
+> gtk3`), openSUSE, anything. No Omarchy, no desktop-specific daemons
+> required.
 
 ## Step 0. Sensor: identify it, flash firmware if needed
 
