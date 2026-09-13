@@ -5,6 +5,8 @@ deleting fingerprints via `fprintd`, with per-service PAM toggles
 (sudo, login, lock screen…). Written for Huawei/Honor laptops, whose
 fingerprint sensor is the same across models (see Step 0).
 
+![Fingerprint GUI](screenshot.png)
+
 > **Works on any Linux.** The tools are plain bash + Python/GTK and only
 > need `fprintd`, `libfprint` and `python-gobject` from your distro's
 > repositories — Arch, Debian (tested by the author on real hardware),
