@@ -13,8 +13,9 @@ fingerprint sensor is the same across models (see Step 0).
 
 ## Step 0. Sensor: identify it, flash firmware if needed
 
-Huawei/Honor AMD laptops (MateBook D14/D15, Honor MagicBook 14/15/Pro and
-siblings) ship the same sensor:
+Huawei/Honor laptops (MateBook D14/D15, Honor MagicBook 14/15/Pro and
+siblings, AMD and Intel alike — the sensor and drivers don't care about
+the CPU) ship the same sensor:
 
 ```
 $ lsusb | grep -i finger
